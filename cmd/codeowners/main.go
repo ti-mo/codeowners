@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/hmarr/codeowners"
+
+	"github.com/boyter/gocodewalker"
 	flag "github.com/spf13/pflag"
 )
 
@@ -55,30 +57,26 @@ func main() {
 	defer out.Flush()
 
 	for _, startPath := range paths {
-		// godirwalk only accepts directories, so we need to handle files separately
-		if !isDir(startPath) {
-			if err := printFileOwners(out, ruleset, startPath, ownerFilters, showUnowned); err != nil {
+		files := make(chan *gocodewalker.File, 1000)
+		walker := gocodewalker.NewFileWalker(startPath, files)
+		walker.SetErrorHandler(func(e error) bool {
+			walker.Terminate()
+			return false
+		})
+
+		go func() {
+			if err := walker.Start(); err != nil {
 				fmt.Fprintf(os.Stderr, "error: %v", err)
 				os.Exit(1)
 			}
-			continue
-		}
+		}()
 
-		err = filepath.WalkDir(startPath, func(path string, d os.DirEntry, err error) error {
-			if path == ".git" {
-				return filepath.SkipDir
+		for f := range files {
+			file := filepath.Join(f.Location, f.Filename)
+			if err := printFileOwners(out, ruleset, file, ownerFilters, showUnowned); err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v", err)
+				os.Exit(1)
 			}
-
-			// Only show code owners for files, not directories
-			if !d.IsDir() {
-				return printFileOwners(out, ruleset, path, ownerFilters, showUnowned)
-			}
-			return nil
-		})
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v", err)
-			os.Exit(1)
 		}
 	}
 }
@@ -124,13 +122,4 @@ func loadCodeowners(path string) (codeowners.Ruleset, error) {
 		return codeowners.LoadFileFromStandardLocation()
 	}
 	return codeowners.LoadFile(path)
-}
-
-// isDir checks if there's a directory at the path specified.
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return false
-	}
-	return info.IsDir()
 }
